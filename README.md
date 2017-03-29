@@ -1,7 +1,9 @@
 # ST3-Java-Autocomplete
 Autocompletion for Sublime Text 3  
   
-This package will use your project's folders to provide autocompletions for your own Java sourcecode. You can configure it to include Java's own sourcecode to further improve it. It can also create getters and setters at the bottom of your class.
+This package will use your project's folders to provide autocompletions for your own Java sourcecode. You can configure it to include Java's own sourcecode to further improve it. It can also create getters and setters at the bottom of your class.  
+  
+Using autocompletion for importing classes, type import and then the class name to save the most time. For some reason, the autocompletion menu for packages doesn't want to display, but you can try typing package FOLDER_NAME and hitting tab to hopefully fill in the rest.  
   
 ## Install
 Go to preferences -> Browse Packages  
