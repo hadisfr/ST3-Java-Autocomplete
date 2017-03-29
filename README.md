@@ -27,6 +27,8 @@ The settings are currently all handled inside the Python (autocomplete.py) file.
   
 **getter_for_final_fields**: whether or not to add getters for final fields.  
   
+**fold_imports**: fold/minimize imports into one line by default when opening a class file (click to expand).  
+  
 **java_zip_archive_dir**: zip archive of the java sourcecode, used for autocompletion. If you want autocompletion for Java's library, you will have to include the src.zip that comes with most (all?) Java JDK installations. Specifically, this src.zip is inside the JDK folder located in Program Files/Java. On MacOS, its located in Library/Java/JavaVirtualMachines.  
   
 **java_zip_archive_from_project**: appends the folder your project files are located (the .sublime-project file folder) to the java_zip_archive_dir if you want to keep the zip with your project files. If, for example, you had a lib folder containing the src.zip in the same directory as the Sublime project file, this variable would be set to java_zip_archive_dir = '/lib/src.zip'.  
