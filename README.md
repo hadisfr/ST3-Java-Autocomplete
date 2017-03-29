@@ -1,7 +1,7 @@
 # ST3-Java-Autocomplete
 Autocompletion for Sublime Text 3  
   
-This package will use your project's configured folders to give you autocompletions for your own Java code. You can configure it to include Java's own source to further give you autocompletions. This can also create getters and setters at the bottom of your class to save you time.  
+This package will use your project's folders to provide autocompletions for your own Java sourcecode. You can configure it to include Java's own sourcecode to further improve it. It can also create getters and setters at the bottom of your class.
   
 ## Install
 Go to preferences -> Browse Packages  
@@ -12,7 +12,7 @@ Add the files from this git into the folder.
   
   
 ## Settings  
-The settings are currently all handled directory in the Python (autocomplete.py) file.  
+The settings are currently all handled inside the Python (autocomplete.py) file.  
   
   
 **class_cache_size**: number of files to keep in memory for autocompletion. The higher the number, the faster things will go, but at a cost for memory.  
@@ -31,5 +31,5 @@ The settings are currently all handled directory in the Python (autocomplete.py)
   
   
 ## Credits
-ST2 Display-Functions: https://github.com/BoundInCode/Display-Functions  
-ST2 JavaSetterGetter: https://github.com/enriquein/JavaSetterGetter
+[ST2 Display-Functions by BoundInCode](https://github.com/BoundInCode/Display-Functions)  
+[ST2 JavaSetterGetter by enriquein](https://github.com/enriquein/JavaSetterGetter)
