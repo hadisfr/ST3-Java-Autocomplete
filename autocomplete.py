@@ -9,10 +9,11 @@ import collections
 # SETTINGS START
 class_cache_size = 8
 add_getter_setter = True
-getter_setter_before_statics = True
-getter_setter_before_inner_classes = True
+getter_setter_before_statics = False
+getter_setter_before_inner_classes = False
 getter_for_final_fields = False
-java_zip_archive_dir = '/lib/java-src.zip' # Appends project dir to beginning
+java_zip_archive_dir = None
+java_zip_archive_from_project = False
 # SETTINGS END
 
 class_cache = collections.OrderedDict()
@@ -150,9 +151,12 @@ def loadJavaZip():
         return
     if java_zip_file_names:
         return
-    projectBase = sublime.active_window().project_file_name()
-    projectBase = projectBase[:projectBase.rfind('/')]
-    java_zip_archive = zipfile.ZipFile(projectBase + java_zip_archive_dir)
+    if java_zip_archive_from_project == True:
+        projectBase = sublime.active_window().project_file_name()
+        projectBase = projectBase[:projectBase.rfind('/')]
+        java_zip_archive = zipfile.ZipFile(projectBase + java_zip_archive_dir)
+    else:
+        java_zip_archive = zipfile.ZipFile(java_zip_archive_dir)
     java_zip_file_names = java_zip_archive.namelist()
 
 def readClass(className):
