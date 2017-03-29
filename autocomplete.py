@@ -12,6 +12,7 @@ add_getter_setter = True
 getter_setter_before_statics = False
 getter_setter_before_inner_classes = False
 getter_for_final_fields = False
+fold_imports = True
 java_zip_archive_dir = None
 java_zip_archive_from_project = False
 # SETTINGS END
@@ -68,10 +69,12 @@ class JavaGetterSetterCommand(sublime_plugin.TextCommand):
             setterArr.append(setter_template.format(capitalName, result['type'], result['varname'], result['indent']))
         if len(getterArr) == 0 and len(setterArr) == 0:
             return
-        lastLine = self.view.line(self.view.size())
-        if not self.view.substr(lastLine).startswith('}'):
-            if not self.view.substr(self.view.line(self.view.size() - 1)).startswith('}'):
-                lastLine = self.view.line(self.view.size() - 1)
+        for i in range(0, 10):
+            lastLine = sublime.Region(self.view.size() - i, self.view.size() + 1 - i)
+            print(self.view.substr(lastLine))
+            if self.view.substr(lastLine).startswith('}'):
+                break;
+        print(self.view.substr(lastLine))
         insertPosition = lastLine.begin()
         if firstStatic == None or firstStatic.begin() == -1:
             firstStatic = lastLine
@@ -87,10 +90,19 @@ class JavaGetterSetterCommand(sublime_plugin.TextCommand):
             insertPosition = firstInterface.begin()
         if insertPosition == -1:
             return
+        methodsText = ''
         if not result['final']:
-            methodsText = '' . join(getterArr) + '\n' + '\n' + '\n' . join(setterArr) + '\n' + '\n'
+            if insertPosition == lastLine.begin():
+                methodsText += '\n'
+            methodsText += '' . join(getterArr) + '\n' + '\n' + '\n' . join(setterArr) + '\n'
+            if insertPosition != lastLine.begin():
+                methodsText += '\n'
         else:
-            methodsText = '' . join(getterArr) + '\n' + '\n'
+            if insertPosition == lastLine.begin():
+                methodsText += '\n'
+            methodsText += '' . join(getterArr) + '\n'
+            if insertPosition != lastLine.begin():
+                methodsText += '\n'
         insertCount = self.view.insert(edit, insertPosition, methodsText)
         self.view.sel().clear()
         self.view.sel().add(sublime.Region(insertPosition, (insertPosition + insertCount)))
@@ -119,8 +131,23 @@ class JavaAutocompletePeriodCommand(sublime_plugin.TextCommand):
             'next_completion_if_showing': False
             })
 
+class FoldImportsCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        import_statements = self.view.find_all(r'^(import|package)')
+        if len(import_statements) > 0:
+            start = self.view.line(import_statements[0]).begin() + 7
+            end = self.view.line(import_statements[-1]).end()
+            if not self.view.fold(sublime.Region(start, end)):
+                self.view.unfold(sublime.Region(start, end))
+
 class FunctionsAutoComplete(sublime_plugin.EventListener):
+    def on_load(self, view):
+        if fold_imports == True and isJavaFile(view):
+            view.run_command("fold_imports")
+
     def on_query_completions(self, view, prefix, locations):
+        if not isJavaFile(view):
+            return
         _completions = []
         line = view.substr(view.line(view.sel()[0]))
         checkPackage(view, line)
@@ -138,6 +165,8 @@ class FunctionsAutoComplete(sublime_plugin.EventListener):
         return sorted(_completions)
 
     def on_modified(self, view):
+        if not isJavaFile(view):
+            return
         line = view.substr(view.line(view.sel()[0]))
         checkGettersSetters(view, line)
 
@@ -145,6 +174,13 @@ class BufferedClass:
     def __init__(self, f, md):
         self.fileData = f
         self.modifiedDate = md
+
+def isJavaFile(view):
+    fileName = view.file_name()
+    if fileName == None:
+        return False
+    ext = os.path.splitext(fileName)[-1]
+    return ext == ".java" or ext == ".JAVA"
 
 def loadJavaZip():
     global java_zip_archive, java_zip_file_names
@@ -373,10 +409,11 @@ def prevWord(view, word, num=1):
 def nextWord(view, word, skip=1):
     return view.word(word.end() + skip)
 
-def findMethods(fileName, staticOnly):
-    if fileName == None:
+def findMethods(fileName, staticOnly, addedClasses):
+    if fileName == None or fileName in addedClasses:
         return []
     readData = readClass(fileName)
+    addedClasses.append(fileName)
     methods = []
     if not readData:
         return methods
@@ -403,7 +440,8 @@ def findMethods(fileName, staticOnly):
     if superClass:
         superClass = superClass.group()
         superClass = superClass[8:]
-        for m in findMethods(findClass(superClass, True), staticOnly):
+        superClassFileName = findClass(superClass, True)
+        for m in findMethods(superClassFileName, staticOnly, addedClasses):
             methods.append(m)
     return methods
 
@@ -412,7 +450,7 @@ def autocompleteAddFunctions(className):
         return False
     classes = findClasses(className, True)
     for className in classes:
-        methods = findMethods(className, False)
+        methods = findMethods(className, False, [])
         if methods:
             for m in methods:
                 completions.append(m)
@@ -423,7 +461,7 @@ def autocompleteAddFunctions(className):
 def autocompleteAddFunctionsStatic(className):
     if not className or len(className) == 0:
         return False
-    methods = findMethods(findClass(className, True), True)
+    methods = findMethods(findClass(className, True), True, [])
     if methods:
         for m in methods:
             completions.append(m)
