@@ -141,6 +141,11 @@ class FunctionsAutoComplete(sublime_plugin.EventListener):
         line = view.substr(view.line(view.sel()[0]))
         checkGettersSetters(view, line)
 
+class BufferedClass:
+    def __init__(self, f, md):
+        self.fileData = f
+        self.modifiedDate = md
+
 def loadJavaZip():
     global java_zip_archive, java_zip_file_names
     if java_zip_archive_dir == None:
@@ -163,21 +168,25 @@ def readClass(className):
     fileName = findClass(className, True)
     if fileName != None and os.path.isfile(fileName):
         if fileName in class_cache:
-            return class_cache[fileName]
+            bc = class_cache[fileName]
+            if bc.modifiedDate == os.path.getmtime(fileName):
+                return bc.fileData
         with open(fileName, 'r') as f:
-            class_cache[fileName] = f.read()
+            bc = BufferedClass(f.read(), os.path.getmtime(fileName))
+            class_cache[fileName] = bc
             if len(class_cache) > class_cache_size:
                 class_cache.popitem(False)
-            return class_cache[fileName]
+            return bc.fileData
     fileName = findClassFromZip(className, True)
     if java_zip_archive != None and fileName != None:
         if fileName in class_cache:
-            return class_cache[fileName]
+            return class_cache[fileName].fileData
         with java_zip_archive.open(fileName, 'r') as f:
-            class_cache[fileName] = f.read().decode('utf-8').replace('\\n', '\n')
+            bc = BufferedClass(f.read().decode('utf-8').replace('\\n', '\n'), 0)
+            class_cache[fileName] = bc
             if len(class_cache) > class_cache_size:
                 class_cache.popitem(False)
-            return class_cache[fileName]
+            return bc.fileData
     return ''
 
 def findClass(className, exactMatch):
