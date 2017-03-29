@@ -1,0 +1,12 @@
+[
+  { "keys": ["."], "command": "java_autocomplete_period",
+  "context": [
+      {
+        "operand": "source.java",
+        "operator": "equal",
+        "match_all": true,
+        "key": "selector"
+      }
+    ]
+  }
+]
