@@ -19,6 +19,8 @@ java_zip_archive_from_project = False
 
 class_cache = collections.OrderedDict()
 
+java_home = None
+
 getter_template = """{3}public {1} get{0}() {{
 {3}    return {2};
 {3}}}"""
@@ -71,10 +73,8 @@ class JavaGetterSetterCommand(sublime_plugin.TextCommand):
             return
         for i in range(0, 10):
             lastLine = sublime.Region(self.view.size() - i, self.view.size() + 1 - i)
-            print(self.view.substr(lastLine))
             if self.view.substr(lastLine).startswith('}'):
                 break;
-        print(self.view.substr(lastLine))
         insertPosition = lastLine.begin()
         if firstStatic == None or firstStatic.begin() == -1:
             firstStatic = lastLine
@@ -120,6 +120,13 @@ class JavaAutocompletePeriodCommand(sublime_plugin.TextCommand):
             if parens != -1:
                 num = sel.end() - parens
                 word = self.view.word(sel.end() - num)
+        if ']' in self.view.substr(sel.begin() - 1):
+            word = prevWord(self.view, word)
+        if ']' in phrase and '[]' not in phrase:
+            parens = findBracketStart(self.view, sel.end() - 1)
+            if parens != -1:
+                num = sel.end() - parens
+                word = self.view.word(sel.end() - num)
         object_types = autocompleteGetObjTypes(self.view, word)
         found1 = autocompleteAddFunctions(object_types[1])
         if found1 == False:
@@ -142,6 +149,7 @@ class FoldImportsCommand(sublime_plugin.TextCommand):
 
 class FunctionsAutoComplete(sublime_plugin.EventListener):
     def on_load(self, view):
+        java_home = os.getenv('JAVA_HOME')
         if fold_imports == True and isJavaFile(view):
             view.run_command("fold_imports")
 
@@ -183,21 +191,27 @@ def isJavaFile(view):
     return ext == ".java" or ext == ".JAVA"
 
 def loadJavaZip():
-    global java_zip_archive, java_zip_file_names
-    if java_zip_archive_dir == None:
+    global java_zip_archive, java_zip_archive_dir, java_zip_file_names, java_home
+    if java_zip_archive_dir == None and java_home == None:
         return
-    if len(java_zip_archive_dir) == 0:
+    if len(java_zip_archive_dir) == 0 and len(java_home) == 0:
         return
     if java_zip_archive:
         return
     if java_zip_file_names:
         return
+    fromDir = java_zip_archive_dir
+    if fromDir == None and java_home != None:
+        fromDir = java_home + '/src.zip'
     if java_zip_archive_from_project == True:
         projectBase = sublime.active_window().project_file_name()
         projectBase = projectBase[:projectBase.rfind('/')]
-        java_zip_archive = zipfile.ZipFile(projectBase + java_zip_archive_dir)
-    else:
-        java_zip_archive = zipfile.ZipFile(java_zip_archive_dir)
+        fromDir = projectBase + fromDir
+    if not os.path.isfile(fromDir):
+        java_zip_archive_dir = None
+        java_home = None
+        return
+    java_zip_archive = zipfile.ZipFile(fromDir)
     java_zip_file_names = java_zip_archive.namelist()
 
 def readClass(className):
@@ -379,7 +393,7 @@ def isMethod(view, word):
     return False
 
 def findParensStart(view, endIndex):
-    search_back = 100
+    search_back = 128
     startIndex = endIndex - search_back
     if startIndex < 0:
         startIndex = 0
@@ -397,9 +411,34 @@ def findParensStart(view, endIndex):
         return startIndex + toret[endIndex - startIndex]
     return -1
 
+def findBracketStart(view, endIndex):
+    search_back = 128
+    startIndex = endIndex - search_back
+    if startIndex < 0:
+        startIndex = 0
+    fromString = view.substr(sublime.Region(startIndex, endIndex + 1))
+    toret = {}
+    pstack = []
+    for i, c in enumerate(fromString):
+        if c == '[':
+            pstack.append(i)
+        elif c == ']':
+            if len(pstack) == 0:
+                continue
+            toret[i] = pstack.pop()
+    if endIndex - startIndex in toret.keys():
+        return startIndex + toret[endIndex - startIndex]
+    return -1
+
 def prevWord(view, word, num=1):
     if '.' in view.substr(word.begin() - 1) and ')' in view.substr(word.begin() - 2):
         parens = findParensStart(view, word.begin() - 2)
+        if parens != -1:
+            num = word.begin() - parens
+        else:
+            num = 3
+    if '.' in view.substr(word.begin() - 1) and ']' in view.substr(word.begin() - 2):
+        parens = findBracketStart(view, word.begin() - 2)
         if parens != -1:
             num = word.begin() - parens
         else:
@@ -501,14 +540,22 @@ def autocompleteGetObjTypes(view, wordRegion):
     regions = view.find_all('(?<![\\w])' + re.escape(string) + '\\b')
     for r in regions:
         previousWord = prevWord(view, r)
-        if "storage.type" in view.scope_name(previousWord.begin()):
-            if view.substr(previousWord) == '> ':
-                types[0] = '<' + view.substr(prevWord(view, r, 2)) + '>'
+        typeWord = previousWord
+        if view.substr(previousWord) == '[] ':
+            previousWord = prevWord(view, r, 3)
+        if view.substr(previousWord) == '> ':
+            typeWord = prevWord(view, r, 2)
+        stS = 'storage.type'
+        if stS in view.scope_name(previousWord.begin()) or stS in view.scope_name(typeWord.begin()):
+            if typeWord != previousWord:
+                types[0] = '<' + view.substr(typeWord) + '>'
             else:
                 types[0] = view.substr(previousWord)
             nxtWord = nextWord(view, r, 7)
             line = view.substr(view.line(nxtWord))
             if ' = new ' in line:
                 types[1] = view.substr(nxtWord)
+            elif typeWord != previousWord:
+                types[1] = view.substr(prevWord(view, typeWord, 2))
             return types
-    return None
+    return types
