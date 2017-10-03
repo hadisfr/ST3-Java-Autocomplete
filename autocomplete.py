@@ -25,8 +25,8 @@ override_class_autocompletes = {} # Prioritizing duplicate classnames
 override_class_autocompletes['List'] = 'ArrayList'
 override_class_autocompletes['Map'] = 'HashMap'
 
-max_open_file_search = 1024
-max_file_search = 8192
+max_open_file_search = 2048
+max_file_search = 16384
 # SETTINGS END
 
 instanceMethodCompletions = []
