@@ -1,7 +1,7 @@
 # ST3-Java-Autocomplete
 Autocompletion for Sublime Text 3
 
-This package will use your project's folders and the src.zip found with Oracles JDK installations to provide autocompletions for Java.
+This package will use your project's folders and the src.zip found with Oracle's JDK installations to provide autocompletions for Java.
 
 ## Install
 Go to preferences -> Browse Packages
