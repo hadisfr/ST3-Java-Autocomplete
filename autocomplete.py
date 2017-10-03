@@ -1,243 +1,470 @@
 import sublime
 import sublime_plugin
-import re
-import os
-import io
-import zipfile
 import collections
+import io
+import os
+import platform
+import re
+import subprocess
+import zipfile
 
 # SETTINGS START
-class_cache_size = 8
-add_getter_setter = True
-getter_setter_before_statics = False
-getter_setter_before_inner_classes = False
-getter_for_final_fields = False
-fold_imports = True
-java_zip_archive_dir = None
-java_zip_archive_from_project = False
+class_cache_size = 64
+
+java_library_completions = True
+# Full path to the src.zip located in the JDK you're using (None to search for it)
+java_library_path = None
+
+show_static_methods = True
+show_instance_fields = True
+show_static_fields = True
+
+override_class_autocompletes = {} # Prioritizing duplicate classnames
+# Example 1: java.awt.List and java.util.List
+# Example 2: java.util.Map methods aren't marked as public
+override_class_autocompletes['List'] = 'ArrayList'
+override_class_autocompletes['Map'] = 'HashMap'
+
+max_open_file_search = 1024
+max_file_search = 8192
 # SETTINGS END
 
-class_cache = collections.OrderedDict()
-
-java_home = None
-
-getter_template = """{3}public {1} get{0}() {{
-{3}    return {2};
-{3}}}"""
-
-setter_template = """{3}public void set{0}({1} {2}) {{
-{3}    this.{2} = {2};
-{3}}}"""
-
-java_field_pattern = "(?P<indent>\s*)" + \
-        "(?P<access>protected|private)" + \
-        "(?: (?P<transient>transient|volatile))?" + \
-        "(?: (?P<static>static))?" + \
-        "(?: (?P<final>final))?" + \
-        "(?: (?P<type>[a-zA-Z0-9_$\<\>\,\.\s]+))" + \
-        "(?: (?P<varname>[a-zA-Z0-9_$]+))" + \
-        "(?:\s*=.+)?;"
-java_field_pattern = re.compile(java_field_pattern)
-
-completions = []
-
+instanceMethodCompletions = []
+instanceFieldCompletions = []
+staticMethodCompletions = []
+staticFieldCompletions = []
+generalCompletions = []
+java_zip_failed = False
 java_zip_archive = None
 java_zip_file_names = None
+class_cache = collections.OrderedDict()
 
-class JavaGetterSetterCommand(sublime_plugin.TextCommand):
+java_comment_pattern = re.compile(r'''((['"])(?:(?!\2|\\).|\\.)*\2)|\/\/[^\n]*|\/\*(?:[^*]|\*(?!\/))*\*\/''')
+java_method_pattern = "(?:(protected|public|default)\s+)" + \
+        "((?:(?:abstract|static|final|synchronized|native)\s+)*)" + \
+        "(?:<[^>]*>\s+)?(\w+(?:\[\])?(?:<.*>)?)\s+" + \
+        "(\w+)\s*" + \
+        "\(\s*([^\)]*)\s*\)"
+java_method_pattern = re.compile(java_method_pattern)
+java_field_pattern = "(?:(protected|public|default)\s+)" + \
+        "((?:(?:transient|volatile|static|final)\s+)*)" + \
+        "(\w+(?:\[\])?(?:<\w+(?:,\s*\w+)?>?)?)\s+" + \
+        "(\w+)\s*" + \
+        "(?:\s*=\s*[^;]+)?;"
+java_field_pattern = re.compile(java_field_pattern)
+java_field_names_pattern = re.compile("(\w+)\s*(?:\s*=\s*[^;,]+)")
+java_class_pattern = "(?:(protected|public|private|default)\s+)?" + \
+        "((?:(?:abstract|static|final)\s+)*)" + \
+        "(?:(class|interface|enum)\s+)" + \
+        "(\w+(?:<\w+(?:,\s*\w+)?>?)?)" + \
+        "(?:\s+extends\s+(\w+(?:<\w+(?:,\s*\w+)?>?)?))?" + \
+        "(?:\s+implements\s+((?:(?:,\s*)*(?:\w+(?:<\w+(?:,\s*\w+)?>?)?))*))?"
+java_class_pattern = re.compile(java_class_pattern)
+
+class PeriodAutocompleteCommand(sublime_plugin.TextCommand):
     def run(self, edit):
         sel = self.view.sel()[0]
-        lineRegion = self.view.line(sel)
-        line = self.view.substr(lineRegion)
-        if sel.end() != lineRegion.end():
+        self.view.insert(edit, sel.end(), '.')
+        if not isJavaFile(self.view):
             return
-        result = javaFieldPattern(line)
-        if result.get('access', None) is None or result.get('static', None) is not None:
+        findClassCompletions(self.view, sel)
+        imLen = len(instanceMethodCompletions)
+        ifLen = len(instanceFieldCompletions)
+        smLen = len(staticMethodCompletions)
+        sfLen = len(staticFieldCompletions)
+        if imLen == 0 and smLen == 0 and ifLen == 0 and sfLen == 0:
             return
-        firstStatic = None
-        firstClass = None
-        firstInterface = None
-        if getter_setter_before_statics:
-            firstStatic = self.view.line(self.view.find(r'\bstatic ', self.view.line(sel).begin()))
-        if getter_setter_before_inner_classes:
-            firstClass = self.view.line(self.view.find(r'\bclass ', self.view.line(sel).begin()))
-            firstInterface = self.view.line(self.view.find(r'\binterface ', self.view.line(sel).begin()))
-        getterArr = []
-        setterArr = []
-        fieldName = result['varname']
-        capitalName = fieldName[0].capitalize() + fieldName[1:len(fieldName)]
-        getterArr.append(getter_template.format(capitalName, result['type'], result['varname'], result['indent']))
-        if not result['final']:
-            setterArr.append(setter_template.format(capitalName, result['type'], result['varname'], result['indent']))
-        if len(getterArr) == 0 and len(setterArr) == 0:
-            return
-        for i in range(0, 10):
-            lastLine = sublime.Region(self.view.size() - i, self.view.size() + 1 - i)
-            if self.view.substr(lastLine).startswith('}'):
-                break;
-        insertPosition = lastLine.begin()
-        if firstStatic == None or firstStatic.begin() == -1:
-            firstStatic = lastLine
-        if firstClass == None or firstClass.begin() == -1:
-            firstClass = lastLine
-        if firstInterface == None or firstInterface.begin() == -1:
-            firstInterface = lastLine
-        if firstStatic.begin() < insertPosition:
-            insertPosition = firstStatic.begin()
-        if firstClass.begin() < insertPosition:
-            insertPosition = firstClass.begin()
-        if firstInterface.begin() < insertPosition:
-            insertPosition = firstInterface.begin()
-        if insertPosition == -1:
-            return
-        methodsText = ''
-        if not result['final']:
-            if insertPosition == lastLine.begin():
-                methodsText += '\n'
-            methodsText += '' . join(getterArr) + '\n' + '\n' + '\n' . join(setterArr) + '\n'
-            if insertPosition != lastLine.begin():
-                methodsText += '\n'
-        else:
-            if insertPosition == lastLine.begin():
-                methodsText += '\n'
-            methodsText += '' . join(getterArr) + '\n'
-            if insertPosition != lastLine.begin():
-                methodsText += '\n'
-        insertCount = self.view.insert(edit, insertPosition, methodsText)
-        self.view.sel().clear()
-        self.view.sel().add(sublime.Region(insertPosition, (insertPosition + insertCount)))
-
-class JavaAutocompletePeriodCommand(sublime_plugin.TextCommand):
-    def run(self, edit):
-        sel = self.view.sel()[0]
-        phrase = self.view.substr(self.view.word(sel.end()))
-        word = self.view.word(sel.end() - 1)
-        self.view.insert(edit, sel.end(), ".")
-        if ')' in self.view.substr(sel.begin() - 1):
-            word = prevWord(self.view, word)
-        if ')' in phrase and '()' not in phrase:
-            parens = findParensStart(self.view, sel.end() - 1)
-            if parens != -1:
-                num = sel.end() - parens
-                word = self.view.word(sel.end() - num)
-        if ']' in self.view.substr(sel.begin() - 1):
-            word = prevWord(self.view, word)
-        if ']' in phrase and '[]' not in phrase:
-            parens = findBracketStart(self.view, sel.end() - 1)
-            if parens != -1:
-                num = sel.end() - parens
-                word = self.view.word(sel.end() - num)
-        object_types = autocompleteGetObjTypes(self.view, word)
-        found1 = autocompleteAddFunctions(object_types[1])
-        if found1 == False:
-            found2 = autocompleteAddFunctions(object_types[0])
-        if found1 or found2 or autocompleteAddFunctionsStatic(self.view.substr(word)):
+        self.view.run_command('hide_auto_complete')
+        def show_auto_complete():
             self.view.run_command('auto_complete', {
-            'disable_auto_insert': True,
-            'api_completions_only': True,
-            'next_completion_if_showing': False
+                'disable_auto_insert': True,
+                'api_completions_only': True,
+                'next_completion_if_showing': False,
+                'auto_complete_commit_on_tab': True
             })
+        sublime.set_timeout(show_auto_complete, 0)
 
-class FoldImportsCommand(sublime_plugin.TextCommand):
+class ParensAutocompleteCommand(sublime_plugin.TextCommand):
     def run(self, edit):
-        import_statements = self.view.find_all(r'^(import|package)')
-        if len(import_statements) > 0:
-            start = self.view.line(import_statements[0]).begin() + 7
-            end = self.view.line(import_statements[-1]).end()
-            if not self.view.fold(sublime.Region(start, end)):
-                self.view.unfold(sublime.Region(start, end))
+        sel = self.view.sel()[0]
+        self.view.insert(edit, sel.end(), '(')
+        if not isJavaFile(self.view):
+            self.view.run_command('insert_snippet', {'contents': '$0)'})
+            return
+        classWord = self.view.word(sel.begin())
+        if self.view.substr(classWord) == '>(':
+            bracketPos = findStartBracket(self.view, classWord.begin(), '<>')
+            if bracketPos != -1:
+                classWord = self.view.word(bracketPos)
+        if classWord is None:
+            self.view.run_command('insert_snippet', {'contents': '$0)'})
+            return
+        newWord = self.view.word(classWord.begin() - 1)
+        if newWord is None or self.view.substr(newWord) != 'new':
+            self.view.run_command('insert_snippet', {'contents': '$0)'})
+            return
+        bufferedClass = getBufferedClass(self.view, self.view.substr(classWord))
+        if bufferedClass is None:
+            self.view.run_command('insert_snippet', {'contents': '$0)'})
+            return
+        for key, value in bufferedClass.constructors.items():
+            if key is None or value is None:
+                continue
+            compArgs = methodArgsToCompletion(value)
+            generalCompletions.append((key, compArgs + ')'))
+        if len(generalCompletions) == 0:
+            self.view.run_command('insert_snippet', {'contents': '$0)'})
+            return
+        self.view.run_command('hide_auto_complete')
+        def show_auto_complete():
+            self.view.run_command('auto_complete', {
+                'disable_auto_insert': True,
+                'api_completions_only': True,
+                'next_completion_if_showing': False,
+                'auto_complete_commit_on_tab': True
+            })
+        sublime.set_timeout(show_auto_complete, 0)
 
 class FunctionsAutoComplete(sublime_plugin.EventListener):
-    def on_load(self, view):
-        java_home = os.getenv('JAVA_HOME')
-        if fold_imports == True and isJavaFile(view):
-            view.run_command("fold_imports")
-
     def on_query_completions(self, view, prefix, locations):
-        if not isJavaFile(view):
-            return
         _completions = []
-        line = view.substr(view.line(view.sel()[0]))
-        checkPackage(view, line)
-        checkImport(view, line)
-        for c in list(set(completions)):
-            c_snip = c
-            params = re.findall('\w+\s+\w+(?=\)|,)',c_snip)
-            num = 1
-            for p in params:
-                c_snip = c_snip.replace(p, '${' + str(num) + ':' + p + '}')
-                num = num + 1
-            c = c.replace(';', '')
-            _completions.append((c, c_snip))
-        del completions[:]
-        return sorted(_completions)
-
-    def on_modified(self, view):
         if not isJavaFile(view):
             return
-        line = view.substr(view.line(view.sel()[0]))
-        checkGettersSetters(view, line)
+        checkImport(view, view.substr(view.line(view.sel()[0])))
+        if len(instanceMethodCompletions) > 0:
+            _completions.extend(sorted(list(set(instanceMethodCompletions))))
+        if len(instanceFieldCompletions) > 0:
+            _completions.extend(sorted(list(set(instanceFieldCompletions))))
+        if len(staticMethodCompletions) > 0:
+            _completions.extend(sorted(list(set(staticMethodCompletions))))
+        if len(staticFieldCompletions) > 0:
+            _completions.extend(sorted(list(set(staticFieldCompletions))))
+        if len(generalCompletions) > 0:
+            _completions.extend(sorted(list(set(generalCompletions))))
+        if len(_completions) == 0:
+            return
+        instanceMethodCompletions.clear()
+        instanceFieldCompletions.clear()
+        staticMethodCompletions.clear()
+        staticFieldCompletions.clear()
+        generalCompletions.clear()
+        return _completions
 
 class BufferedClass:
-    def __init__(self, f, md):
-        self.fileData = f
+    def __init__(self, fn, md):
+        self.fileName = fn
         self.modifiedDate = md
+        self.outerClass = None
+        self.accessModifier = None
+        self.extends = None
+        self.constructors = {}
+        self.methods = {}
+        self.fields = {}
+        self.staticMethods = {}
+        self.staticFields = {}
+        self.innerClasses = {}
 
-def isJavaFile(view):
-    fileName = view.file_name()
-    if fileName == None:
+class ClassMethod:
+    def __init__(self, n, t, a):
+        self.name = n
+        self.type = t
+        self.args = a
+
+class ClassField:
+    def __init__(self, n, t, a):
+        self.name = n
+        self.type = t
+
+def findEndBracket(text, bracketPos, brackets, missing = False):
+    view = None
+    if not isinstance(text, str):
+        if bracketPos == -1:
+            return -1
+        view = text
+        maxRange = min(bracketPos + max_open_file_search, view.size())
+        viewStartOffset = bracketPos
+        viewEndOffset = min(viewStartOffset + 64, view.size())
+        text = view.substr(sublime.Region(viewStartOffset, viewEndOffset))
+    else:
+        maxRange = min(bracketPos + max_file_search, len(text))
+    pstack = []
+    textLength = len(text)
+    for i in range(bracketPos, maxRange):
+        if view is not None:
+            textOffset = i - viewEndOffset
+            if textOffset >= textLength:
+                viewStartOffset = max(viewStartOffset + 64, textLength)
+                viewEndOffset = max(viewEndOffset + 64, textLength)
+                text = view.substr(sublime.Region(viewStartOffset, viewEndOffset))
+                textLength = len(text)
+                textOffset = i - viewEndOffset
+            if textOffset >= textLength:
+                break
+            c = text[textOffset]
+        else:
+            c = text[i]
+        if c == brackets[0]:
+            pstack.append(i)
+        elif c == brackets[1]:
+            if len(pstack) == 0:
+                if bracketPos == -1:
+                    return i
+                continue
+            if bracketPos == pstack.pop():
+                return i
+    return -1
+
+def findStartBracket(text, bracketPos, brackets, missing = False):
+    view = None
+    if not isinstance(text, str):
+        if bracketPos == -1:
+            return -1
+        view = text
+        minRange = max(bracketPos - max_open_file_search, -1)
+        viewEndOffset = bracketPos
+        viewStartOffset = max(viewEndOffset - 63, 0)
+        text = view.substr(sublime.Region(viewStartOffset, viewEndOffset + 1))
+    else:
+        minRange = max(bracketPos - max_file_search, -1)
+    pstack = []
+    maxRange = bracketPos
+    if bracketPos == -1:
+        maxRange = len(text) - 1
+        minRange = max(maxRange - max_file_search, -1)
+    textLength = len(text)
+    for i in range(maxRange, minRange, -1):
+        if view is not None:
+            textOffset = i - viewEndOffset + (textLength - 1)
+            if textOffset < 0:
+                viewStartOffset = max(viewStartOffset - 64, 0)
+                viewEndOffset = max(viewEndOffset - 64, 0)
+                text = view.substr(sublime.Region(viewStartOffset, viewEndOffset + 1))
+                textLength = len(text)
+                textOffset = i - viewEndOffset + (textLength - 1)
+            if textOffset < 0:
+                break
+            c = text[textOffset]
+        else:
+            c = text[i]
+        if c == brackets[1]:
+            pstack.append(i)
+        elif c == brackets[0]:
+            if len(pstack) == 0:
+                if bracketPos == -1:
+                    return i
+                continue
+            if bracketPos == pstack.pop():
+                return i
+    return -1
+
+def findClassCompletions(view, word):
+    line = view.line(word.begin())
+    lineBegin = line.begin()
+    line = view.substr(line)
+    line = line[:word.begin() - lineBegin]
+    missingParensPos = findStartBracket(line, -1, '()')
+    if missingParensPos != -1:
+        line = line[missingParensPos + 1:]
+    while True:
+        bracketStart = line.rfind('(')
+        if bracketStart == -1:
+            break;
+        bracketEnd = findEndBracket(line, bracketStart, '()')
+        if bracketEnd == -1:
+            break;
+        line = line[:bracketStart] + line[bracketEnd + 1:]
+    while True:
+        bracketStart = line.rfind('[')
+        if bracketStart == -1:
+            break;
+        bracketEnd = findEndBracket(line, bracketStart, '[]')
+        if bracketEnd == -1:
+            break;
+        line = line[:bracketStart] + line[bracketEnd + 1:]
+    while True:
+        match = re.search('[^0-9a-zA-Z_$.]+', line)
+        if match is None:
+            break
+        match = match.group()
+        startPos = line.find(match)
+        line = line[startPos + len(match):]
+    line = line.strip()
+    if line.find('this.') != -1: # Better ways to handle this than handing it back off to Sublime
+        line = line[line.find('this.') + 5:]
+    keys = line.split('.')
+    if len(keys) == 0:
+        return
+    firstKey = keys[0]
+    del keys[0]
+    baseClass = getLocalClass(view, firstKey, word.begin())
+    static = False
+    if baseClass is None:
+        baseClass = firstKey
+        static = True
+    currentClass = lastClass = fromClass = baseClass
+    for index, key in enumerate(keys):
+        currentClass = findKeyClass(view, currentClass, key)
+        static = False
+        if currentClass == 'E' or currentClass == 'V':
+            if index == 0:
+                currentClass = getLocalClass(view, firstKey, word.begin(), True)
+            else:
+                currentClass = findKeyClass(view, fromClass, keys[index - 1], True)
+        fromClass = lastClass
+        lastClass = currentClass
+    addClassCompletions(view, getBufferedClass(view, currentClass), static)
+
+def getLocalClass(view, key, maxPos, classType = False):
+    if key == 'super':
+        className = getClassName(view.file_name())
+        bufferedClass = getBufferedClass(view, className)
+        if bufferedClass is None or bufferedClass.extends is None:
+            return None
+        return bufferedClass.extends
+    regions = view.find_all('(?<![\\w])' + re.escape(key) + '\\b')
+    for region in reversed(regions):
+        if region.begin() > maxPos:
+            continue
+        if 'new' not in view.substr(view.word(region.end() + 3)):
+            classWord = view.word(region.begin() - 1)
+            classWordString = re.escape(view.substr(classWord))
+            regionString = re.escape(view.substr(region))
+            wholeString = view.substr(sublime.Region(classWord.begin(), region.end()))
+            if re.search('[^([]\s+' + regionString, wholeString) is None:
+                continue
+        else:
+            classWord = view.word(region.end() + 7)
+            if classType:
+                bracketPos = findEndBracket(view, classWord.end(), '<>')
+                if bracketPos != -1:
+                    classWord = view.word(bracketPos)
+        if view.substr(classWord) == '[] ':
+            classWord = view.word(region.begin() - 3)
+        if view.substr(classWord) == '> ':
+            if classType:
+                classWord = view.word(region.begin() - 2)
+            else:
+                bracketPos = findStartBracket(view, classWord.begin(), '<>')
+                if bracketPos != -1:
+                    classWord = view.word(bracketPos)
+        scopeName = view.scope_name(classWord.begin())
+        if classWord is not None and 'storage.type' in scopeName:
+            return view.substr(classWord)
+        if classWord is not None and 'constant.other' in scopeName:
+            return view.substr(classWord)
+    return findKeyClass(view, getClassName(view.file_name()), key, classType)
+
+def findKeyClass(view, className, key, classType = False):
+    if not key.endswith('('):
+        key += '('
+    origKey = key[:-1]
+    bufferedClass = getBufferedClass(view, className)
+    if bufferedClass is None:
+        return None
+    if bufferedClass.accessModifier == 'private':
+        editingClass = getClassName(view.file_name())
+        if editingClass != className and editingClass != bufferedClass.outerClass:
+            return None
+    for _key, _value in bufferedClass.methods.items():
+        if _key is None or _value is None:
+            continue
+        if key in _key and _value.type is not None:
+            type = _value.type.replace('[]', '')
+            if '<' in type:
+                if classType:
+                    type = type[type.find('<') + 1:type.find('>')]
+                    if type.find(',') != -1:
+                        type = type[type.find(',') + 1:].strip()
+                else:
+                    type = type[:type.find('<')]
+            return type
+    for _key, _value in bufferedClass.staticMethods.items():
+        if _key is None or _value is None:
+            continue
+        if key in _key and _value.type is not None:
+            if '<' in type:
+                if classType:
+                    type = type[type.find('<') + 1:type.find('>')]
+                    if type.find(',') != -1:
+                        type = type[type.find(',') + 1:].strip()
+                else:
+                    type = type[:type.find('<')]
+            return type
+    for _key, _value in bufferedClass.fields.items():
+        if _key is None or _value is None:
+            continue
+        if origKey == _key and _value is not None:
+            type = _value.replace('[]', '')
+            if '<' in type:
+                if classType:
+                    type = type[type.find('<') + 1:type.find('>')]
+                    if type.find(',') != -1:
+                        type = type[type.find(',') + 1:].strip()
+                else:
+                    type = type[:type.find('<')]
+            return type
+    for _key, _value in bufferedClass.staticFields.items():
+        if _key is None or _value is None:
+            continue
+        if origKey == _key and _value is not None:
+            type = _value.replace('[]', '')
+            if '<' in type:
+                if classType:
+                    type = type[type.find('<') + 1:type.find('>')]
+                    if type.find(',') != -1:
+                        type = type[type.find(',') + 1:].strip()
+                else:
+                    type = type[:type.find('<')]
+            return type
+    if bufferedClass.extends is not None:
+        return findKeyClass(view, bufferedClass.extends, key)
+    else:
+        return None
+
+def addClassCompletions(view, bufferedClass, staticOnly):
+    if bufferedClass is None:
         return False
-    ext = os.path.splitext(fileName)[-1]
-    return ext == ".java" or ext == ".JAVA"
+    if not staticOnly:
+        for key, value in bufferedClass.methods.items():
+            if key is None or value is None:
+                continue
+            if len(key) > 48:
+                key = key[:48].strip() + '...'
+            compArgs = methodArgsToCompletion(value.args)
+            instanceMethodCompletions.append((key + '\t' + value.type, value.name + '(' + compArgs + ')'))
+        if show_instance_fields:
+            for key, value in bufferedClass.fields.items():
+                if key is None or value is None:
+                    continue
+                if len(key) > 48:
+                    key = key[:48].strip() + '...'
+                instanceFieldCompletions.append((key + '\t' + value, key))
+    if show_static_methods:
+        for key, value in bufferedClass.staticMethods.items():
+            if key is None or value is None:
+                continue
+            if len(key) > 48:
+                key = key[:48].strip() + '...'
+            compArgs = methodArgsToCompletion(value.args)
+            staticMethodCompletions.append((key + '\t' + value.type, value.name + '(' + compArgs + ')'))
+    if show_static_fields:
+        for key, value in bufferedClass.staticFields.items():
+            if key is None or value is None:
+                continue
+            if len(key) > 48:
+                key = key[:48].strip() + '...'
+            staticFieldCompletions.append((key + '\t' + value, key))
+    if bufferedClass.extends is not None:
+        addClassCompletions(view, getBufferedClass(view, bufferedClass.extends), staticOnly)
+    return True
 
-def loadJavaZip():
-    global java_zip_archive, java_zip_archive_dir, java_zip_file_names, java_home
-    if java_zip_archive_dir == None and java_home == None:
-        return
-    if len(java_zip_archive_dir) == 0 and len(java_home) == 0:
-        return
-    if java_zip_archive:
-        return
-    if java_zip_file_names:
-        return
-    fromDir = java_zip_archive_dir
-    if fromDir == None and java_home != None:
-        fromDir = java_home + '/src.zip'
-    if java_zip_archive_from_project == True:
-        projectBase = sublime.active_window().project_file_name()
-        projectBase = projectBase[:projectBase.rfind('/')]
-        fromDir = projectBase + fromDir
-    if not os.path.isfile(fromDir):
-        java_zip_archive_dir = None
-        java_home = None
-        return
-    java_zip_archive = zipfile.ZipFile(fromDir)
-    java_zip_file_names = java_zip_archive.namelist()
-
-def readClass(className):
-    fileName = findClass(className, True)
-    if fileName != None and os.path.isfile(fileName):
-        if fileName in class_cache:
-            bc = class_cache[fileName]
-            if bc.modifiedDate == os.path.getmtime(fileName):
-                return bc.fileData
-        with open(fileName, 'r') as f:
-            bc = BufferedClass(f.read(), os.path.getmtime(fileName))
-            class_cache[fileName] = bc
-            if len(class_cache) > class_cache_size:
-                class_cache.popitem(False)
-            return bc.fileData
-    fileName = findClassFromZip(className, True)
-    if java_zip_archive != None and fileName != None:
-        if fileName in class_cache:
-            return class_cache[fileName].fileData
-        with java_zip_archive.open(fileName, 'r') as f:
-            bc = BufferedClass(f.read().decode('utf-8').replace('\\n', '\n'), 0)
-            class_cache[fileName] = bc
-            if len(class_cache) > class_cache_size:
-                class_cache.popitem(False)
-            return bc.fileData
-    return ''
+def methodArgsToCompletion(args):
+    argsList = re.findall('[^,\s][^,]+\<[^>]+>[^,\n]*|[^,\s][^,\n]+', args)
+    num = 1
+    for arg in argsList:
+        args = args.replace(arg, '${' + str(num) + ':' + arg + '}')
+        num = num + 1
+    return args
 
 def findClass(className, exactMatch):
     for file in sublime.active_window().folders():
@@ -255,7 +482,7 @@ def findClasses(className, exactMatch):
 
 def findClassesFromDir(directory, className, exactMatch):
     matches = []
-    if className == None:
+    if className is None:
         return matches
     classNameL = className.lower()
     for fileName in os.listdir(directory):
@@ -285,9 +512,9 @@ def findClassFromZip(className, exactMatch):
 def findClassesFromZip(className, exactMatch):
     loadJavaZip()
     matches = []
-    if java_zip_archive == None:
+    if java_zip_archive is None:
         return matches
-    if className == None:
+    if className is None:
         return matches
     classNameL = className.lower()
     for fileName in java_zip_file_names:
@@ -304,26 +531,199 @@ def findClassesFromZip(className, exactMatch):
             matches.append(fileName)
     return matches
 
-def findPackages(packageName, exactMatch):
-    matches = []
-    for file in sublime.active_window().folders():
-        matches.extend(findPackagesFrom(file, packageName, exactMatch))
-    return matches
+def loadJavaZip():
+    global java_zip_failed, java_zip_archive, java_zip_file_names
+    if not java_library_completions or java_zip_failed or java_zip_archive or java_zip_file_names:
+        return
+    javaPath = None
+    whichPath = java_library_path
+    if java_library_path is None:
+        paths = [ 'javac', 'java', 'javac.exe', 'java.exe' ]
+        for path in paths:
+            path = which(path)
+            if path is not None:
+                whichPath = path
+                break;
+    if whichPath is None:
+        java_zip_failed = True
+        return
+    whichPath = os.path.dirname(whichPath)
+    if os.path.isfile(os.path.join(whichPath, 'src.zip')):
+        javaPath = os.path.abspath(os.path.join(whichPath, 'src.zip'))
+    elif os.path.isfile(os.path.join(whichPath, '../src.zip')):
+        javaPath = os.path.abspath(os.path.join(whichPath, '../src.zip'))
+    if javaPath is None and platform.system() == 'Darwin':
+        whichPath = subprocess.check_output('echo $(/usr/libexec/java_home)', shell = True).decode()
+        whichPath = whichPath.replace('\n', '')
+        if os.path.isfile(os.path.join(whichPath, 'src.zip')):
+            javaPath = os.path.abspath(os.path.join(whichPath, 'src.zip'))
+        elif os.path.isfile(os.path.join(whichPath, '../src.zip')):
+            javaPath = os.path.abspath(os.path.join(whichPath, '../src.zip'))
+    if javaPath is None:
+        java_zip_failed = True
+        return
+    java_zip_archive = zipfile.ZipFile(javaPath)
+    java_zip_file_names = java_zip_archive.namelist()
 
-def findPackagesFrom(directory, packageName, exactMatch):
-    matches = []
-    packageNameL = packageName.lower()
-    for fileName in os.listdir(directory):
-        fileName = os.path.join(directory, fileName)
-        fileNameL = fileName.replace('\\', '/').lower()
-        if not os.path.isdir(fileName):
+def which(search = None):
+    if search:
+        (path, name) = os.path.split(search)
+        if os.access(search, os.X_OK):
+            return search
+        for path in os.environ.get('PATH').split(os.pathsep):
+            fullPath = os.path.join(path, search)
+            if os.access(fullPath, os.X_OK):
+                return fullPath
+    return None
+
+def getBufferedClass(view, className):
+    if className is None:
+        return None
+    subClassName = None
+    if '$' in className:
+        indexof = className.find('$')
+        subClassName = className[indexof + 1:]
+        className = className[:indexof]
+    if className in override_class_autocompletes:
+        className = override_class_autocompletes[className]
+    matchedBufferedClass = None
+    if className in class_cache:
+        bufferedClass = class_cache[className]
+        md = bufferedClass.modifiedDate
+        if md == 0 or subClassName is not None or md == os.path.getmtime(bufferedClass.fileName):
+            matchedBufferedClass = bufferedClass
+    if matchedBufferedClass is None:
+        fileName = findClass(className, True)
+        if fileName is not None and os.path.isfile(fileName):
+            fileDate = os.path.getmtime(fileName)
+            with open(fileName, 'r') as f:
+                matchedBufferedClass = addBufferedClass(fileName, f.read())
+        else:
+            fileName = findClassFromZip(className, True)
+            if java_zip_archive is not None and fileName is not None:
+                with java_zip_archive.open(fileName, 'r') as f:
+                    fileData = f.read().decode('utf-8').replace('\\n', '\n')
+                    matchedBufferedClass = addBufferedClass(fileName, fileData)
+    if matchedBufferedClass is not None and subClassName is not None:
+        if subClassName in matchedBufferedClass.innerClasses:
+            return matchedBufferedClass.innerClasses[subClassName]
+        matchedBufferedClass = None
+    editingClass = getClassName(view.file_name())
+    if matchedBufferedClass is None and className != editingClass and subClassName is None:
+        return getBufferedClass(view, editingClass + '$' + className)
+    else:
+        return matchedBufferedClass
+
+def addBufferedClass(fileName, fileData):
+    className = getClassName(fileName)
+    if os.path.isfile(fileName):
+        bufferedClass = BufferedClass(fileName, os.path.getmtime(fileName))
+    else:
+        bufferedClass = BufferedClass(fileName, 0)
+    if '$' in fileName:
+        bufferedClass.outerClass = fileName[:fileName.find('$')]
+    for match in java_comment_pattern.finditer(fileData):
+        group0 = match.group(0)
+        group1 = match.group(1)
+        group2 = match.group(2)
+        if group1 is not None or group2 is not None:
             continue
-        if exactMatch and '/' in fileNameL and fileNameL[(fileNameL.rindex('/') + 1):] == packageNameL:
-            matches.append(fileName)
-        if not exactMatch and '/' in fileNameL and packageNameL in fileNameL[(fileNameL.rindex('/') + 1):]:
-            matches.append(fileName)
-        matches.extend(findPackagesFrom(fileName, packageName, exactMatch))
-    return matches
+        fileData = fileData.replace(group0, '', 1)
+    innerClasses = java_class_pattern.finditer(fileData)
+    next(innerClasses)
+    for innerClass in innerClasses:
+        fullGroup = innerClass.group()
+        if len(fullGroup) == 0:
+            continue
+        innerClassName = innerClass.group(4)
+        indexofInner = fileData.find(fullGroup)
+        indexofBracket = fileData.find('{', indexofInner)
+        foundBracket = findEndBracket(fileData, indexofBracket, '{}')
+        if foundBracket == -1:
+            continue
+        innerClass = fileData[indexofInner:foundBracket + 1]
+        fileName = className + '$' + innerClassName
+        bufferedClass.innerClasses[innerClassName] = addBufferedClass(fileName, innerClass)
+        fileData = fileData[:indexofInner] + fileData[foundBracket + 1:]
+    classInfo = java_class_pattern.search(fileData)
+    if classInfo is not None:
+        bufferedClass.accessModifier = classInfo.group(1)
+        bufferedClass.extends = classInfo.group(5)
+    cr = '(?:(protected|public|default)\s+)(' + re.escape(className) + ')\s*\(\s*([^\)]*)\s*\)';
+    while True:
+        constructor = re.search(cr, fileData)
+        if constructor is None:
+            break
+        fullGroup = constructor.group()
+        if len(fullGroup) == 0:
+            break
+        constructorName = constructor.group(2)
+        constructorArgs = constructor.group(3)
+        constructorArgs = constructorArgs.replace('\n', '')
+        constructorArgs = constructorArgs.replace('\r', '')
+        constructorArgs = re.sub('\s\s+', ' ', constructorArgs)
+        fullName = constructorName + '(' + constructorArgs + ')'
+        bufferedClass.constructors[fullName] = constructorArgs
+        constructorPos = fileData.find(constructor.group())
+        bracketStartPos = fileData.find('{', constructorPos)
+        if bracketStartPos == -1:
+            fileData = fileData[:constructorPos] + fileData[constructorPos + len(fullGroup) + 1:]
+            continue
+        bracketEndPos = findEndBracket(fileData, bracketStartPos, '{}')
+        if bracketEndPos == -1:
+            fileData = fileData[:constructorPos] + fileData[constructorPos + len(fullGroup) + 1:]
+            continue
+        fileData = fileData[:constructorPos] + fileData[bracketEndPos + 1:]
+    while True:
+        method = java_method_pattern.search(fileData)
+        if method is None:
+            break
+        fullGroup = method.group()
+        if len(fullGroup) == 0:
+            break
+        methodName = method.group(4)
+        methodArgs = method.group(5)
+        methodArgs = methodArgs.replace('\n', '')
+        methodArgs = methodArgs.replace('\r', '')
+        methodArgs = re.sub('\s\s+', ' ', methodArgs)
+        fullName = methodName + '(' + methodArgs + ')'
+        keywords = method.group(2).strip()
+        if 'static' in keywords:
+            bufferedClass.staticMethods[fullName] = ClassMethod(methodName, method.group(3), methodArgs)
+        else:
+            bufferedClass.methods[fullName] = ClassMethod(methodName, method.group(3), methodArgs)
+        methodPos = fileData.find(fullGroup)
+        if 'abstract' in keywords:
+            semicolonPos = fileData.find(';', methodPos)
+            if semicolonPos == -1:
+                fileData = fileData[:methodPos] + fileData[methodPos + len(fullGroup) + 1:]
+                continue
+            fileData = fileData[:methodPos] + fileData[semicolonPos + 1:]
+        else:
+            bracketStartPos = fileData.find('{', methodPos)
+            if bracketStartPos == -1:
+                fileData = fileData[:methodPos] + fileData[methodPos + len(fullGroup) + 1:]
+                continue
+            bracketEndPos = findEndBracket(fileData, bracketStartPos, '{}')
+            if bracketEndPos == -1:
+                fileData = fileData[:methodPos] + fileData[methodPos + len(fullGroup) + 1:]
+                continue
+            fileData = fileData[:methodPos] + fileData[bracketEndPos + 1:]
+    fields = java_field_pattern.finditer(fileData)
+    for field in fields:
+        keywords = field.group(2).strip()
+        type = field.group(3)
+        fieldNames = java_field_names_pattern.finditer(field.group())
+        for fieldName in fieldNames:
+            if 'static' in keywords:
+                bufferedClass.staticFields[fieldName.group(1)] = type
+            else:
+                bufferedClass.fields[fieldName.group(1)] = type
+    if '$' not in fileName:
+        class_cache[className] = bufferedClass
+        if len(class_cache) > class_cache_size:
+            class_cache.popitem(False)
+    return bufferedClass
 
 def checkImport(view, line):
     if line.startswith('import '):
@@ -339,223 +739,26 @@ def checkImport(view, line):
                 start_index = partialClass.find('source.')
                 if start_index != -1:
                     partialClass = partialClass[start_index + 7:]
-            completions.append(partialClass + ';')
+            name = partialClass
+            path = ''
+            if '.' in name:
+                path = name[:name.rfind('.')]
+                name = name[name.rfind('.') + 1:]
+            generalCompletions.append((name + '\t' + path, partialClass + ';'))
 
-def checkPackage(view, line):
-    if line.startswith('package '):
-        input = view.substr(view.word(view.sel()[0].end()))
-        input = line[8:].replace('.', '/')
-        partialPackages = findPackages(input, False)
-        for partialPackage in partialPackages:
-            partialPackage = partialPackage.replace('/', '.').replace('\\', '.')
-            start_index = partialPackage.find('src.')
-            if start_index != -1:
-                partialPackage = partialPackage[start_index + 4:]
-            else:
-                start_index = partialPackage.find('source.')
-                if start_index != -1:
-                    partialPackage = partialPackage[start_index + 7:]
-            completions.append(partialPackage + ';')
+def getClassName(fileName):
+    if fileName.rfind('/') != -1:
+        fileName = fileName[fileName.rfind('/') + 1:]
+    if fileName.rfind('\\') != -1:
+        fileName = fileName[fileName.rfind('\\') + 1:]
+    if fileName.rfind('$') != -1:
+        fileName = fileName[fileName.rfind('$') + 1:]
+    if fileName.find('.') != -1:
+        fileName = fileName[:fileName.rfind('.')]
+    return fileName
 
-def checkGettersSetters(view, line):
-    if not add_getter_setter:
-        return
-    if 'private ' not in line and 'protected ' not in line:
-        return
-    if ';' not in line:
-        return
-    if 'static ' in line:
-        return
-    if not getter_for_final_fields and 'final ' in line:
-        return
-    view.run_command('java_getter_setter')
-
-def javaFieldPattern(line):
-    m = java_field_pattern.match(line)
-    if m:
-        return m.groupdict()
-    else:
-        return {}
-
-def isMethod(view, word):
-    wordChecker = view.substr(word)
-    wordPrev = view.substr(word.begin() - 1)
-    if ' ' in wordPrev:
-        return False
-    if ')' in wordChecker:
-        return True
-    if '.' in wordChecker:
-        return True
-    if ')' in wordPrev:
-        return True
-    if '.' in wordPrev:
-        return True
-    return False
-
-def findParensStart(view, endIndex):
-    search_back = 128
-    startIndex = endIndex - search_back
-    if startIndex < 0:
-        startIndex = 0
-    fromString = view.substr(sublime.Region(startIndex, endIndex + 1))
-    toret = {}
-    pstack = []
-    for i, c in enumerate(fromString):
-        if c == '(':
-            pstack.append(i)
-        elif c == ')':
-            if len(pstack) == 0:
-                continue
-            toret[i] = pstack.pop()
-    if endIndex - startIndex in toret.keys():
-        return startIndex + toret[endIndex - startIndex]
-    return -1
-
-def findBracketStart(view, endIndex):
-    search_back = 128
-    startIndex = endIndex - search_back
-    if startIndex < 0:
-        startIndex = 0
-    fromString = view.substr(sublime.Region(startIndex, endIndex + 1))
-    toret = {}
-    pstack = []
-    for i, c in enumerate(fromString):
-        if c == '[':
-            pstack.append(i)
-        elif c == ']':
-            if len(pstack) == 0:
-                continue
-            toret[i] = pstack.pop()
-    if endIndex - startIndex in toret.keys():
-        return startIndex + toret[endIndex - startIndex]
-    return -1
-
-def prevWord(view, word, num=1):
-    if '.' in view.substr(word.begin() - 1) and ')' in view.substr(word.begin() - 2):
-        parens = findParensStart(view, word.begin() - 2)
-        if parens != -1:
-            num = word.begin() - parens
-        else:
-            num = 3
-    if '.' in view.substr(word.begin() - 1) and ']' in view.substr(word.begin() - 2):
-        parens = findBracketStart(view, word.begin() - 2)
-        if parens != -1:
-            num = word.begin() - parens
-        else:
-            num = 3
-    return view.word(word.begin() - num)
-
-def nextWord(view, word, skip=1):
-    return view.word(word.end() + skip)
-
-def findMethods(fileName, staticOnly, addedClasses):
-    if fileName == None or fileName in addedClasses:
-        return []
-    readData = readClass(fileName)
-    addedClasses.append(fileName)
-    methods = []
-    if not readData:
-        return methods
-    if staticOnly:
-        methodLines = re.findall('public static.*|protected static.*|static public.*|static protected.*', readData)
-    else:
-        methodLines = re.findall('public.*|protected.*', readData)
-    for l in methodLines:
-        s = re.search('(\w+)\s*\(.*\)(?=.*\{)', l)
-        if not s:
-            continue
-        if '(' not in l:
-            continue
-        split = l[0:l.index('(')].split(' ')
-        if len(split) < 3:
-            continue
-        methods.append(s.group().strip())
-    comments = re.findall("/\*.*", readData)
-    for c in comments:
-        for m in methods:
-            if m in c:
-                methods.remove(m)
-    superClass = re.search("extends\s*(\w*)", readData)
-    if superClass:
-        superClass = superClass.group()
-        superClass = superClass[8:]
-        superClassFileName = findClass(superClass, True)
-        for m in findMethods(superClassFileName, staticOnly, addedClasses):
-            methods.append(m)
-    return methods
-
-def autocompleteAddFunctions(className):
-    if not className or len(className) == 0:
-        return False
-    classes = findClasses(className, True)
-    for className in classes:
-        methods = findMethods(className, False, [])
-        if methods:
-            for m in methods:
-                completions.append(m)
-    if classes and len(classes) > 0:
-        return True
-    return False
-
-def autocompleteAddFunctionsStatic(className):
-    if not className or len(className) == 0:
-        return False
-    methods = findMethods(findClass(className, True), True, [])
-    if methods:
-        for m in methods:
-            completions.append(m)
-    if methods:
-        return True
-    return False
-
-def autocompleteGetReturnType(view, currentWord, methodRegion):
-    method = view.substr(methodRegion)
-    fileName = findClass(currentWord, True)
+def isJavaFile(view):
+    fileName = view.file_name()
     if fileName == None:
-        return None
-    readData = readClass(fileName)
-    returnType = re.search('([\w]+)(?=(?![\n\r]+)\s*' + re.escape(method) + ')', readData)
-    if returnType == None:
-        extend = re.search('extends\s*(\w+)', readData)
-        return autocompleteGetReturnType(view, extend.group(1), methodRegion)
-    returnType = returnType.group()
-    return returnType
-
-def autocompleteGetObjTypes(view, wordRegion):
-    types = ['', '']
-    previousWord = prevWord(view, wordRegion)
-    if 'super' in view.substr(wordRegion):
-        extend = view.find('extends', 0)
-        types[0] = view.substr(nextWord(view, extend))
-        return types
-    if isMethod(view, wordRegion):
-        prevObjType = autocompleteGetObjTypes(view, previousWord)
-        objType = autocompleteGetReturnType(view, prevObjType[0], wordRegion)
-        if prevObjType[0].startswith('<') and prevObjType[0].endswith('>'):
-            types[0] = prevObjType[0][1:prevObjType[0].index('>')]
-        else:
-            types[0] = objType
-        return types
-    string = view.substr(wordRegion)
-    regions = view.find_all('(?<![\\w])' + re.escape(string) + '\\b')
-    for r in regions:
-        previousWord = prevWord(view, r)
-        typeWord = previousWord
-        if view.substr(previousWord) == '[] ':
-            previousWord = prevWord(view, r, 3)
-        if view.substr(previousWord) == '> ':
-            typeWord = prevWord(view, r, 2)
-        stS = 'storage.type'
-        if stS in view.scope_name(previousWord.begin()) or stS in view.scope_name(typeWord.begin()):
-            if typeWord != previousWord:
-                types[0] = '<' + view.substr(typeWord) + '>'
-            else:
-                types[0] = view.substr(previousWord)
-            nxtWord = nextWord(view, r, 7)
-            line = view.substr(view.line(nxtWord))
-            if ' = new ' in line:
-                types[1] = view.substr(nxtWord)
-            elif typeWord != previousWord:
-                types[1] = view.substr(prevWord(view, typeWord, 2))
-            return types
-    return types
+        return False
+    return fileName.endswith(".java")

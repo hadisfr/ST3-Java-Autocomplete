@@ -1,5 +1,25 @@
 [
-  { "keys": ["."], "command": "java_autocomplete_period",
+  { "keys": ["."], "command": "period_autocomplete",
+  "context": [
+      {
+        "operand": "source.java",
+        "operator": "equal",
+        "match_all": true,
+        "key": "selector"
+      }
+    ]
+  },
+  { "keys": ["("], "command": "parens_autocomplete",
+  "context": [
+      {
+        "operand": "source.java",
+        "operator": "equal",
+        "match_all": true,
+        "key": "selector"
+      }
+    ]
+  },
+  { "keys": [";"], "command": "java_getter_setter",
   "context": [
       {
         "operand": "source.java",
