@@ -13,6 +13,8 @@ Add the files from this git into the folder.
 ![Constructors](screenshots/constructors.png)
 ![Method field chaining](screenshots/method_field_chains.png)
 ![List chaining](screenshots/list_chaining.png)
+![Inner classes](screenshots/inner_classes.png)
+![Getter and setter adding](screenshots/getter_setter.png)
 
 ## Credits
 [ST2 Display-Functions by BoundInCode](https://github.com/BoundInCode/Display-Functions)
