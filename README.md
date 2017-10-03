@@ -4,8 +4,8 @@ Autocompletion for Sublime Text 3
 This package will use your project's folders and the src.zip found with Oracle's JDK installations to provide autocompletions for Java.
 
 ## Install
-Go to preferences -> Browse Packages
-Create a folder named Java-AutoComplete
+Go to preferences -> Browse Packages.
+Create a folder named Java-AutoComplete.
 Add the files from this git into the folder.
 
 ## Screenshots
@@ -17,5 +17,5 @@ Add the files from this git into the folder.
 ![Getter and setter adding](screenshots/getter_setter.png)
 
 ## Credits
-[ST2 Display-Functions by BoundInCode](https://github.com/BoundInCode/Display-Functions)
+[ST2 Display-Functions by BoundInCode](https://github.com/BoundInCode/Display-Functions) and
 [ST2 JavaSetterGetter by enriquein](https://github.com/enriquein/JavaSetterGetter)
