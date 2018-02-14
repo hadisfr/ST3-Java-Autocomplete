@@ -564,6 +564,9 @@ def loadJavaZip():
         return
     java_zip_archive = zipfile.ZipFile(javaPath)
     java_zip_file_names = java_zip_archive.namelist()
+    for i in range(len(java_zip_file_names)):
+        java_zip_file_names[i] = java_zip_file_names[i][java_zip_file_names[i].find('\\') + 1:]
+        java_zip_file_names[i] = java_zip_file_names[i][java_zip_file_names[i].find('/') + 1:]
 
 def which(search = None):
     if search:
