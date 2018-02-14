@@ -553,6 +553,8 @@ def loadJavaZip():
         javaPath = os.path.abspath(os.path.join(whichPath, 'src.zip'))
     elif os.path.isfile(os.path.join(whichPath, '../src.zip')):
         javaPath = os.path.abspath(os.path.join(whichPath, '../src.zip'))
+    elif os.path.isfile(os.path.join(whichPath, 'lib/src.zip')):
+        javaPath = os.path.abspath(os.path.join(whichPath, 'lib/src.zip'))
     if javaPath is None and platform.system() == 'Darwin':
         whichPath = subprocess.check_output('echo $(/usr/libexec/java_home)', shell = True).decode()
         whichPath = whichPath.replace('\n', '')
@@ -560,6 +562,8 @@ def loadJavaZip():
             javaPath = os.path.abspath(os.path.join(whichPath, 'src.zip'))
         elif os.path.isfile(os.path.join(whichPath, '../src.zip')):
             javaPath = os.path.abspath(os.path.join(whichPath, '../src.zip'))
+        elif os.path.isfile(os.path.join(whichPath, 'lib/src.zip')):
+            javaPath = os.path.abspath(os.path.join(whichPath, 'lib/src.zip'))
     if javaPath is None:
         java_zip_failed = True
         return
