@@ -546,6 +546,7 @@ def loadJavaZip():
                 break;
     if whichPath is None:
         java_zip_failed = True
+        print("Java_Autocomplete: java_zip_failed")
         return
     whichPath = os.path.dirname(whichPath)
     if os.path.isfile(os.path.join(whichPath, 'src.zip')):
