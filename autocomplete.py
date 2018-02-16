@@ -467,6 +467,9 @@ def methodArgsToCompletion(args):
     return args
 
 def findClass(className, exactMatch):
+    fileNames = findClassesFromFile(sublime.active_window().extract_variables()["file"], className, exactMatch)
+    if fileNames and len(fileNames) > 0:
+        return fileNames[0]
     for file in sublime.active_window().folders():
         fileNames = findClassesFromDir(file, className, exactMatch)
         if fileNames and len(fileNames) > 0:
@@ -480,28 +483,36 @@ def findClasses(className, exactMatch):
     matches.extend(findClassesFromZip(className, exactMatch))
     return matches
 
-def findClassesFromDir(directory, className, exactMatch):
+def findClassesFromDir(directory, className, exactMatch, classNameL = None):
     matches = []
     if className is None:
         return matches
     classNameL = className.lower()
     for fileName in os.listdir(directory):
-        fileName = os.path.join(directory, fileName)
-        fileNameL = fileName.replace('\\', '/').lower()
-        if os.path.isdir(fileName):
-            foundClasses = findClassesFromDir(fileName, className, exactMatch)
-            if foundClasses is not None:
-                matches.extend(foundClasses)
-        if not fileNameL.endswith('.java'):
-            continue
-        if exactMatch and fileNameL == classNameL:
-            matches.append(fileName)
-        if exactMatch and '/' in fileNameL and fileNameL[(fileNameL.rindex('/') + 1):-5] == classNameL:
-            matches.append(fileName)
-        if not exactMatch and '/' in fileNameL and classNameL in fileNameL[(fileNameL.rindex('/') + 1):-5]:
-            matches.append(fileName)
-        if not exactMatch and '/' in fileNameL and '/' in classNameL and classNameL in fileNameL:
-            matches.append(fileName)
+        matches += (findClassesFromFile(os.path.join(directory, fileName), className, exactMatch, classNameL))
+    return matches
+
+def findClassesFromFile(fileName, className, exactMatch, classNameL = None):
+    matches = []
+    if className is None:
+        return matches
+    if classNameL is None:
+        classNameL = className.lower()
+    fileNameL = fileName.replace('\\', '/').lower()
+    if os.path.isdir(fileName):
+        foundClasses = findClassesFromDir(fileName, className, exactMatch, classNameL)
+        if foundClasses is not None:
+            matches.extend(foundClasses)
+    if not fileNameL.endswith('.java'):
+        return matches
+    if exactMatch and fileNameL == classNameL:
+        matches.append(fileName)
+    if exactMatch and '/' in fileNameL and fileNameL[(fileNameL.rindex('/') + 1):-5] == classNameL:
+        matches.append(fileName)
+    if not exactMatch and '/' in fileNameL and classNameL in fileNameL[(fileNameL.rindex('/') + 1):-5]:
+        matches.append(fileName)
+    if not exactMatch and '/' in fileNameL and '/' in classNameL and classNameL in fileNameL:
+        matches.append(fileName)
     return matches
 
 def findClassFromZip(className, exactMatch):
