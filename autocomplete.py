@@ -569,9 +569,6 @@ def loadJavaZip():
         return
     java_zip_archive = zipfile.ZipFile(javaPath)
     java_zip_file_names = java_zip_archive.namelist()
-    for i in range(len(java_zip_file_names)):
-        java_zip_file_names[i] = java_zip_file_names[i][java_zip_file_names[i].find('\\') + 1:]
-        java_zip_file_names[i] = java_zip_file_names[i][java_zip_file_names[i].find('/') + 1:]
 
 def which(search = None):
     if search:
@@ -739,14 +736,7 @@ def checkImport(view, line):
         input = line[7:].replace('.', '/')
         partialClasses = findClasses(input, False)
         for partialClass in partialClasses:
-            partialClass = partialClass[:-5].replace('/', '.').replace('\\', '.')
-            start_index = partialClass.find('src.')
-            if start_index != -1:
-                partialClass = partialClass[start_index + 4:]
-            else:
-                start_index = partialClass.find('source.')
-                if start_index != -1:
-                    partialClass = partialClass[start_index + 7:]
+            partialClass = partialClass.replace('\\', '/')[partialClass.find('/') + 1:-5].replace('/', '.')
             name = partialClass
             path = ''
             if '.' in name:
